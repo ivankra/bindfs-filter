@@ -1933,6 +1933,7 @@ static void print_usage(const char *progname)
            "  --multithreaded           Enable multithreaded mode. See man page\n"
            "                            for security issue with current implementation.\n"
            "  --forward-odirect=...     Forward O_DIRECT (it's cleared by default).\n"
+           "  --filter=relpath          Remove path from the mirrored directory.\n"
            "\n"
            "FUSE options:\n"
            "  -o opt[,opt,...]          Mount options.\n"
@@ -2004,14 +2005,23 @@ static int process_option(void *data, const char *arg, int key,
 
     case OPTKEY_FILTER:
         if (arg && strncmp(arg, "--filter=", 9) == 0) {
-            const char *path = arg + 9;
-            while (*path == '/') {
-                path++;
-            }
-            settings.filtered_paths = realloc(settings.filtered_paths,
-                (settings.num_filtered_paths + 1) * sizeof(char*));
-            settings.filtered_paths[settings.num_filtered_paths++] = strdup(path);
+            arg += 9;
+        } else if (arg && strncmp(arg, "filter=", 7) == 0) {
+            arg += 7;
+        } else {
+            fprintf(stderr, "Bad --filter arg: %s\n", arg ? arg : "(null)");
+            return -1;
         }
+        while (*arg == '/') {
+            arg++;
+        }
+        if (*arg == 0) {
+            fprintf(stderr, "Bad --filter flag: refusing to filter root directory\n");
+            return -1;
+        }
+        settings.filtered_paths = realloc(settings.filtered_paths,
+            (settings.num_filtered_paths + 1) * sizeof(char*));
+        settings.filtered_paths[settings.num_filtered_paths++] = strdup(arg);
         return 0;
 
     case OPTKEY_CREATE_AS_USER:
