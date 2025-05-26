@@ -143,6 +143,9 @@ static struct Settings {
     RateLimiter *read_limiter;
     RateLimiter *write_limiter;
 
+    char **filtered_paths;
+    int num_filtered_paths;
+
     enum CreatePolicy {
         CREATE_AS_USER,
         CREATE_AS_MOUNTER
@@ -385,10 +388,47 @@ static int is_mirrored_user(uid_t uid)
     return 0;
 }
 
+static bool is_path_filtered(const char *path, const char *filename)
+{
+    if (!path || settings.num_filtered_paths == 0)
+        return false;
+
+    if (*path == '/') {
+        path++;
+    }
+
+    for (int i = 0; i < settings.num_filtered_paths; i++) {
+        const char *f = settings.filtered_paths[i];
+        const char *p = path;
+        for (; *f && *f == *p; f++, p++);
+        if (*f == '\0' && (*p == '\0' || *p == '/')) {
+            /* exact match or path is a subdirectory of filtered path */
+            return true;
+        }
+        if (filename && *p == '\0' &&
+            (*f == '/' || f == settings.filtered_paths[i])) {
+            /* path matches prefix of filtered path, continue matching filename */
+            if (*f == '/') {
+                f++;
+            }
+            for (p = filename; *f && *f == *p; f++, p++);
+        }
+        if (*f == '\0' && *p == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 static char *process_path(const char *path, bool resolve_symlinks)
 {
     if (path == NULL) { /* possible? */
         errno = EINVAL;
+        return NULL;
+    }
+
+    if (is_path_filtered(path, NULL)) {
+        errno = ENOENT;
         return NULL;
     }
 
@@ -768,6 +808,10 @@ static int bindfs_getattr(const char *path, struct stat *stbuf)
     (void)fi;
 #endif
 
+    if (is_path_filtered(path, NULL)) {
+        return -ENOENT;
+    }
+
     real_path = process_path(path, true);
     if (real_path == NULL)
         return -errno;
@@ -881,6 +925,10 @@ static int bindfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 result = -errno;
             }
             break;
+        }
+
+        if (is_path_filtered(path, de->d_name)) {
+            continue;
         }
 
         struct stat st;
@@ -1930,7 +1978,8 @@ enum OptionKey {
     OPTKEY_RESOLVE_SYMLINKS,
     OPTKEY_BLOCK_DEVICES_AS_FILES,
     OPTKEY_DIRECT_IO,
-    OPTKEY_NO_DIRECT_IO
+    OPTKEY_NO_DIRECT_IO,
+    OPTKEY_FILTER
 };
 
 static int process_option(void *data, const char *arg, int key,
@@ -1952,6 +2001,18 @@ static int process_option(void *data, const char *arg, int key,
         printf("libfuse interface compile-time version %d.%d\n", FUSE_MAJOR_VERSION, FUSE_MINOR_VERSION);
         printf("libfuse interface linked version %d.%d\n", fuse_version() / 10, fuse_version() % 10);
         exit(0);
+
+    case OPTKEY_FILTER:
+        if (arg && strncmp(arg, "--filter=", 9) == 0) {
+            const char *path = arg + 9;
+            while (*path == '/') {
+                path++;
+            }
+            settings.filtered_paths = realloc(settings.filtered_paths,
+                (settings.num_filtered_paths + 1) * sizeof(char*));
+            settings.filtered_paths[settings.num_filtered_paths++] = strdup(path);
+        }
+        return 0;
 
     case OPTKEY_CREATE_AS_USER:
         if (getuid() == 0) {
@@ -2562,6 +2623,7 @@ int main(int argc, char *argv[])
         OPT_OFFSET2("--uid-offset=%s", "uid-offset=%s", uid_offset, -1),
         OPT_OFFSET2("--gid-offset=%s", "gid-offset=%s", gid_offset, -1),
         OPT_OFFSET("fsname=%s", fsname, -1),
+        OPT2("--filter=%s", "filter=%s", OPTKEY_FILTER),
 
         FUSE_OPT_END
     };
@@ -2608,6 +2670,8 @@ int main(int argc, char *argv[])
     settings.ctime_from_mtime = 0;
     settings.enable_lock_forwarding = 0;
     settings.enable_ioctl = 0;
+    settings.filtered_paths = NULL;
+    settings.num_filtered_paths = 0;
     settings.uid_offset = 0;
     settings.gid_offset = 0;
 #ifdef __linux__
